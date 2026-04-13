@@ -1,0 +1,25 @@
+# Alternative Hallucination Check Prompt - Strict Mode
+# Author: Example
+# Description: Very strict hallucination detection, flags any deviation
+
+Strictly analyze if the answer is DIRECTLY supported by the reference text:
+
+Question: {question}
+Answer: {answer}
+Reference Text: {chunk}
+
+Evaluation criteria (Strict):
+1. Every claim must be explicitly in the reference text
+2. Inferences beyond the text = hallucination
+3. Missing required context = hallucination risk
+4. Any contradiction with reference = hallucination
+
+Score 0.0 = completely grounded
+Score 1.0 = completely hallucinated
+Score 0.5 = partially hallucinated
+
+Response format (EXACTLY):
+HALLUCINATION_RISK: [X.X]
+GROUNDED_CLAIMS: [number]
+HALLUCINATED_CLAIMS: [number]
+REASONING: [brief analysis]

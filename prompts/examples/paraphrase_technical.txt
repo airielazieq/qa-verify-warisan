@@ -1,0 +1,17 @@
+# Alternative Paraphrase Prompt - More Technical
+# Author: Example
+# Description: For technical content, prefers detailed technical explanation
+
+Given the following:
+Question: {question}
+Short Answer: {answer}
+Reference Text/Chunk: {chunk}
+
+Create an improved, technically accurate answer that:
+1. Preserves all technical terminology
+2. Adds implementation details from the reference text
+3. Includes relevant examples if present in the chunk
+4. Uses clear, structured formatting
+5. Is at least 60 words
+
+Return ONLY the improved answer with no explanations or extra text.

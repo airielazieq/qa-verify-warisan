@@ -1,0 +1,18 @@
+# Alternative Language Fix Prompt - Malay-to-English
+# Author: Example
+# Description: Translates mixed BM/Indonesian content to English
+
+Analyze and translate the following text from mixed Bahasa Malaysia/Indonesian to English:
+
+Text: {text}
+Related Question: {question}
+Related Chunk: {chunk}
+
+Requirements:
+1. Translate to clear, professional English
+2. Maintain technical/domain-specific terms if they are standardized English terms
+3. Preserve accuracy and original meaning
+4. Keep formatting and structure consistent
+5. Handle proper nouns and local references appropriately
+
+Return ONLY the English translation with no explanations.

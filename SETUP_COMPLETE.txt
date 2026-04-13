@@ -1,0 +1,159 @@
+╔════════════════════════════════════════════════════════════════╗
+║         QA CLEANER WITH PROMPT MANAGEMENT SYSTEM              ║
+║                    SETUP COMPLETE ✓                            ║
+╚════════════════════════════════════════════════════════════════╝
+
+📁 FOLDER STRUCTURE CREATED
+═══════════════════════════
+
+qa-verify/
+│
+├── 🔧 SCRIPTS & SETUP
+│   ├── qa_cleaner.py              (Main script)
+│   ├── prompt_manager.py           (Prompt loader)
+│   ├── example_usage.py            (Usage examples)
+│   ├── requirements.txt            (Dependencies)
+│   └── run.sh                      (Quick start)
+│
+├── 📂 PROMPTS (Editable - Use these!)
+│   ├── config.yaml                 ← Central configuration
+│   ├── paraphrase.txt              ← Change these files
+│   ├── language_fix.txt            ← to customize behavior
+│   ├── hallucination_check.txt
+│   ├── SHARING_TEMPLATE.txt
+│   │
+│   └── 📚 examples/ (Reference only - Copy to use)
+│       ├── paraphrase_technical.txt
+│       ├── language_translate_en.txt
+│       └── hallucination_strict.txt
+│
+└── 📖 DOCUMENTATION (Read these!)
+    ├── DOCUMENTATION_INDEX.md      ← You are here
+    ├── QUICK_PROMPT_GUIDE.md       ← Start with this!
+    ├── README.md                   (Full features)
+    ├── PROMPTS_GUIDE.md            (Detailed guide)
+    └── PROMPTS_STRUCTURE.txt       (Folder reference)
+
+═══════════════════════════════════════════════════════════════════
+
+🚀 QUICK START (3 STEPS)
+════════════════════════
+
+1. Install dependencies:
+   pip install -r requirements.txt
+
+2. Set API key (if not already set):
+   export ANTHROPIC_API_KEY="sk-ant-your-key"
+
+3. Run on your data:
+   python qa_cleaner.py your_data.csv -o output.csv
+
+═══════════════════════════════════════════════════════════════════
+
+🎯 HOW PROMPT SYSTEM WORKS
+═══════════════════════════
+
+┌─────────────────────────────────────┐
+│   prompts/config.yaml               │
+│   (Define which prompts to use)     │
+└─────────────────────────────────────┘
+           ↓
+┌─────────────────────────────────────┐
+│   PromptManager (prompt_manager.py) │
+│   (Loads prompts from files)        │
+└─────────────────────────────────────┘
+           ↓
+┌─────────────────────────────────────┐
+│   qa_cleaner.py                     │
+│   (Uses prompts for LLM calls)      │
+└─────────────────────────────────────┘
+
+Result: Easy to swap/customize prompts without touching code!
+
+═══════════════════════════════════════════════════════════════════
+
+💡 COMMON TASKS
+═══════════════
+
+USE COLLEAGUE'S PROMPTS:
+  cp ~/downloads/*.txt prompts/
+  python qa_cleaner.py data.csv -o output.csv
+
+TRY ALTERNATIVE PROMPT:
+  cp prompts/examples/paraphrase_technical.txt prompts/paraphrase.txt
+  python qa_cleaner.py data.csv -o output.csv
+
+CUSTOMIZE A PROMPT:
+  # Edit prompts/paraphrase.txt in your editor
+  python qa_cleaner.py data.csv -o output.csv
+
+BACKUP & RESTORE:
+  cp -r prompts prompts_backup
+  # ... make changes ...
+  cp -r prompts_backup prompts
+
+═══════════════════════════════════════════════════════════════════
+
+📋 FILES TO READ
+════════════════
+
+NEW USERS:              Start with QUICK_PROMPT_GUIDE.md
+DETAILED GUIDE:         Read PROMPTS_GUIDE.md
+FULL FEATURES:          Read README.md
+FOLDER REFERENCE:       See PROMPTS_STRUCTURE.txt
+ALTERNATIVE PROMPTS:    Check prompts/examples/README.md
+
+═══════════════════════════════════════════════════════════════════
+
+✨ WHAT'S NEW IN THIS VERSION
+══════════════════════════════
+
+✅ Prompts are in separate files (not hardcoded)
+✅ Central config file (prompts/config.yaml)
+✅ Easy to swap/customize prompts
+✅ Pre-built example prompts included
+✅ PromptManager handles all loading
+✅ Template variables for flexibility
+✅ Shareable prompt packages
+
+═══════════════════════════════════════════════════════════════════
+
+🔑 KEY CONCEPTS
+═════════════
+
+ACTIVE PROMPTS (prompts/*.txt)
+  → These are used by the script
+  → Edit/replace these to change behavior
+  → Names/paths referenced in config.yaml
+
+EXAMPLE PROMPTS (prompts/examples/*.txt)
+  → Reference alternatives
+  → Copy into prompts/ to use them
+  → No automatic changes
+
+CONFIG FILE (prompts/config.yaml)
+  → Maps prompt names to files
+  → Central control point
+  → Easy to switch between versions
+
+═══════════════════════════════════════════════════════════════════
+
+❓ GETTING HELP
+═══════════════
+
+Script Issues:
+  → README.md → Troubleshooting section
+
+Prompt Questions:
+  → PROMPTS_GUIDE.md → Troubleshooting section
+
+Need Different Prompts:
+  → prompts/examples/ → Try alternatives
+
+Want to Customize:
+  → QUICK_PROMPT_GUIDE.md → "Customize a Prompt"
+
+═══════════════════════════════════════════════════════════════════
+
+✓ You're all set! Start with: QUICK_PROMPT_GUIDE.md
+

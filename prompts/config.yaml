@@ -1,0 +1,15 @@
+# QA Cleaner Prompt Configuration
+# This file maps prompt names to their respective files
+# You can easily swap prompts by changing file references
+
+prompts:
+  paraphrase: paraphrase.txt
+  language_fix: language_fix.txt
+  hallucination_check: hallucination_check.txt
+
+# Prompt metadata (optional)
+metadata:
+  version: "1.0"
+  author: "Default"
+  language: "en"
+  creation_date: "2026-04-10"

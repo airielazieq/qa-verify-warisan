@@ -1,0 +1,105 @@
+# QA Cleaner - Folder Structure
+
+```
+qa-verify/
+│
+├── qa_cleaner.py              # Main script
+├── prompt_manager.py          # Prompt loading/management
+├── requirements.txt           # Dependencies
+├── sample_data.csv           # Sample input data
+├──
+├── prompts/                   # [EDITABLE] Prompt files
+│   ├── config.yaml           # Central prompt configuration
+│   ├── paraphrase.txt        # Default paraphrase prompt
+│   ├── language_fix.txt      # Default language fixing prompt
+│   ├── hallucination_check.txt
+│   │
+│   └── examples/             # [REFERENCE] Alternative prompt examples
+│       ├── README.md
+│       ├── paraphrase_technical.txt
+│       ├── language_translate_en.txt
+│       └── hallucination_strict.txt
+│
+├── README.md                 # Main documentation
+├── PROMPTS_GUIDE.md         # Complete prompt management guide
+└── PROMPTS_STRUCTURE.txt    # This file (folder reference)
+```
+
+## Key Directories
+
+### ✏️ `prompts/` (Active, Editable)
+- Contains the actual prompts used by the script
+- Edit these files to customize behavior
+- `config.yaml` controls which prompts are loaded
+
+### 📚 `prompts/examples/` (Reference Only)
+- Pre-built prompt variations
+- Copy files from here into `prompts/` to use them
+- Contains different strategies for paraphrasing, language fixing, etc.
+
+## Workflow
+
+### Use Default Prompts (No Changes Needed)
+```
+qa-verify/ $ python qa_cleaner.py your_data.csv -o output.csv
+```
+Loads from: `prompts/paraphrase.txt`, `prompts/language_fix.txt`, etc.
+
+### Customize a Prompt
+```
+1. Edit a file in prompts/ directly
+2. Changes apply automatically on next run
+```
+
+### Try an Alternative Prompt
+```
+1. Copy from prompts/examples/ to prompts/
+   cp prompts/examples/paraphrase_technical.txt prompts/paraphrase_v2.txt
+2. Update config.yaml to use it
+3. Run: python qa_cleaner.py data.csv -o output.csv
+```
+
+### Use Colleague's Prompts
+```
+1. Have them send: paraphrase.txt, language_fix.txt, hallucination_check.txt
+2. Backup your current prompts/
+3. Replace with their files
+4. Run normally
+```
+
+## Files to Edit
+
+### If you want to...
+
+| Goal | Edit this | How |
+|------|-----------|-----|
+| Change paraphrasing style | `prompts/paraphrase.txt` | Edit the template directly |
+| Use different language rules | `prompts/language_fix.txt` | Edit the template directly |
+| Try alternative prompts | `prompts/config.yaml` | Change filename references |
+| Add a new prompt type | `prompts/config.yaml` + new `.txt` file | Add entry to config + create file |
+
+## Files NOT to Edit (Usually)
+
+- `qa_cleaner.py` - Only if you're adding code features
+- `prompt_manager.py` - Only if changing how prompts load
+- `requirements.txt` - Only if adding dependencies
+- Examples in `prompts/examples/` - These are for reference only
+
+## Quick Reference: Using Colleague's Prompts
+
+```bash
+# Step 1: Backup your current setup
+cp -r prompts prompts_backup
+
+# Step 2: Get colleague's files
+# (They send you: paraphrase.txt, language_fix.txt, hallucination_check.txt)
+
+# Step 3: Copy into prompts/
+cp ~/downloads/colleague_prompts/*.txt prompts/
+
+# Step 4: Run normally
+python qa_cleaner.py data.csv -o output.csv
+
+# Step 5: If you want to go back
+cp -r prompts_backup prompts
+```
