@@ -1,0 +1,9 @@
+TASK
+Check if the answer is too short (less than 10 words).
+
+INPUT
+- Jawapan: {answer}
+- Word count: {word_count}
+
+OUTPUT (single value, no extra text):
+is_too_short: true|false

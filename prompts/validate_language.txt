@@ -1,0 +1,14 @@
+TASK
+Check if the answer contains mixed languages (combination of Malay and non-Malay that are not intended technical terms, proper nouns, or established terms from the source).
+
+INPUT
+- Jawapan: {answer}
+- Potongan_teks: {chunk}
+
+RULES
+Only count as mixed language if:
+- Non-Malay words are NOT technical terms, proper nouns, scientific names, or established terms in the source
+- There is significant mixing between Malay and non-Malay (more than just a few words)
+
+OUTPUT (single value, no extra text):
+has_mixed_language: true|false

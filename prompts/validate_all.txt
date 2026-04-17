@@ -1,0 +1,37 @@
+TASK
+Validate a QA answer on multiple dimensions: length, noise, language mixing.
+This validation checks the ORIGINAL answer to identify data quality issues in the raw input.
+
+INPUT
+- Soalan: {question}
+- Jawapan (original): {answer}
+- Potongan_teks: {chunk}
+- Word count: {word_count}
+
+VALIDATION RULES
+
+1. IS_TOO_SHORT
+   - Flag as true if answer has < 10 words
+   - Current word count: {word_count}
+
+2. HAS_NOISE
+   - Detect: extra punctuation, repeated characters, encoding errors, random symbols, or unrelated content
+   - Analyze the answer for artifacts that don't belong
+
+3. NOISE_PERCENTAGE
+   - Estimate percentage of answer that is noise (0.0 to 1.0)
+   - If has_noise is false, return 0.0
+
+4. HAS_MIXED_LANGUAGE
+   - Check if answer mixes Malay and non-Malay improperly
+   - Do NOT flag as mixed if non-Malay words are:
+     * Technical terms, proper nouns, scientific names
+     * Established terms that appear in Potongan_teks
+     * Legitimate borrowed words in standard Malay
+   - Only flag if there is significant unwanted mixing
+
+OUTPUT (one value per line, no extra text):
+IS_TOO_SHORT: true|false
+HAS_NOISE: true|false
+NOISE_PERCENTAGE: 0.0-1.0
+HAS_MIXED_LANGUAGE: true|false

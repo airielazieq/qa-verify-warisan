@@ -1,0 +1,11 @@
+TASK
+Analyze the answer for noise, irrelevant information, or artifacts that don't belong.
+Noise includes: extra punctuation, repeated characters, encoding errors, random symbols, or content clearly unrelated to the question.
+
+INPUT
+- Soalan: {question}
+- Jawapan: {answer}
+
+OUTPUT (two values per line, no extra text):
+has_noise: true|false
+noise_percentage: 0.0-1.0
