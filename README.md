@@ -12,6 +12,15 @@ A Python tool for validating and cleaning Q&A datasets by detecting hallucinatio
 6. **External Prompt Management** - Centralized prompt configuration via `prompts/config.yaml` for easy customization
 7. **Comprehensive Output** - Exports both original and cleaned versions for comparison
 
+## Project Structure
+
+- **qa_cleaner.py** - Main QA validation and cleaning script
+- **prompt_manager.py** - Manages loading and caching of LLM prompts
+- **prompts/** - Configuration and prompt templates
+- **requirements.txt** - Python dependencies
+- **SSUN_ALGORITHM.md** - Technical details on semantic similarity detection
+- **PROMPTS_STRUCTURE.txt** - Guide for prompt file organization
+
 ## Benefits of Local LLM (Ollama)
 ✅ **No API Keys** - Works completely locally  
 ✅ **Privacy** - Your data never leaves your computer  
