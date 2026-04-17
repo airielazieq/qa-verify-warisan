@@ -5,6 +5,7 @@
 prompts:
   unified_cleaner: unified_qa_cleaner.txt
   validate_all: validate_all.txt
+  combined_cleaner: combined_cleaner.txt
 
 # Prompt metadata (optional)
 metadata:

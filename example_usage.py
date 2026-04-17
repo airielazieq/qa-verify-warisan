@@ -5,44 +5,31 @@ Example: Using QA Cleaner with Ollama
 
 from qa_cleaner import QAValidator
 
-# Initialize validator with Ollama
-# Note: Make sure Ollama is running: ollama serve
-# And the model is pulled: ollama pull qwen2.5:27b
+# Make sure Ollama is running:  ollama serve
+# And the model is pulled:      ollama pull qwen3:8b
+#
+# For maximum throughput, set OLLAMA_NUM_PARALLEL before starting Ollama:
+#   $env:OLLAMA_NUM_PARALLEL = "4"   (PowerShell)
+#   set OLLAMA_NUM_PARALLEL=4        (cmd)
 
 validator = QAValidator(
     ollama_host="http://localhost:11434",
-    model="qwen2.5:27b"
+    model="qwen3:8b",
+    workers=4,          # concurrent Ollama requests — match OLLAMA_NUM_PARALLEL
+    context_size=32768, # large enough for 6000-word chunks
 )
 
-# Process a single record
-record = validator.process_record(
-    question="Bagaimana cara membuat list dalam Python?",
-    answer="gunakan []",
-    chunk="Untuk membuat list dalam Python, gunakan tanda kurung siku [] dengan elemen-elemen dipisahkan oleh koma. Contoh: my_list = [1, 2, 3, 'a', 'b']"
-)
-
-# Check results
-print(f"Question: {record.question}")
-print(f"Original Answer: {record.answer}")
-print(f"Cleaned Answer: {record.cleaned_answer}")
-print(f"Hallucination Risk: {record.similarity_score:.2%}")
-print(f"Too Short: {record.is_too_short}")
-print(f"Has Noise: {record.has_noise}")
-print(f"Mixed Language: {record.has_mixed_language}")
-
-# Or process an entire CSV file
-print("\n" + "="*50)
-print("Processing CSV file with Ollama...")
-print("="*50)
-
-results = validator.process_csv("sample_data.csv")
+# Process an entire CSV file (batch SSUN + parallel LLM calls)
+results = validator.process_csv("input.csv")
 validator.export_results("example_output.csv")
 
 # Access results programmatically
-for i, result in enumerate(results[:2], 1):
+for i, r in enumerate(results[:2], 1):
     print(f"\nRecord {i}:")
-    print(f"  Similarity Score: {result.similarity_score:.3f}")
-    print(f"  Noise: {result.has_noise} ({result.noise_percentage:.1%})")
-    print(f"  Too short: {result.is_too_short}")
-    print(f"  Mixed Language: {result.has_mixed_language}")
-
+    print(f"  Question:         {r.question[:60]}…")
+    print(f"  Original Answer:  {r.answer[:60]}…")
+    print(f"  Cleaned Answer:   {r.cleaned_answer[:60]}…")
+    print(f"  Hallucination Risk: {r.similarity_score:.2%}")
+    print(f"  Too Short:        {r.is_too_short}")
+    print(f"  Has Noise:        {r.has_noise} ({r.noise_percentage:.1%})")
+    print(f"  Mixed Language:   {r.has_mixed_language}")

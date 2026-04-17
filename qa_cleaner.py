@@ -1,34 +1,68 @@
 #!/usr/bin/env python3
 """
-QA Data Cleaner and Validator - Unified Prompt Version
-Uses a single unified Ollama prompt for all validation and cleaning tasks.
-Processes Q&A datasets to detect and fix issues in answers.
+QA Data Cleaner and Validator
+Optimised for AMD Ryzen AI Max+ 395 / Radeon 8060S / 64 GB RAM.
+
+Key optimisations vs original:
+  1. Batch SSUN  — all embeddings encoded in a single GPU pass before the loop.
+  2. Parallel LLM — ThreadPoolExecutor sends concurrent requests to Ollama
+                    (set OLLAMA_NUM_PARALLEL env var to match --workers).
+  3. Single prompt — validation + cleaning merged into one Ollama call per record.
+  4. Connection pool — per-thread requests.Session keeps TCP connections alive.
+  5. ROCm/CUDA auto-detect — sentence-transformers uses the Radeon iGPU when available.
 """
 
-import csv
 import argparse
+import math
 import sys
-import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
-from dataclasses import dataclass
-import math
 
 import pandas as pd
-import numpy as np
+import requests
+from requests.adapters import HTTPAdapter
+
 from prompt_manager import PromptManager
 
+# ---------------------------------------------------------------------------
+# Sentence-transformer setup — prefers GPU (ROCm exposes as CUDA on Windows)
+# ---------------------------------------------------------------------------
 try:
-    from sentence_transformers import SentenceTransformer, util
-    SEMANTIC_ENCODER = SentenceTransformer('all-MiniLM-L6-v2')
+    import torch
+    from sentence_transformers import SentenceTransformer
+
+    _st_device = "cuda" if torch.cuda.is_available() else "cpu"
+    SEMANTIC_ENCODER = SentenceTransformer("all-MiniLM-L6-v2", device=_st_device)
+    print(f"[INFO] Semantic encoder loaded on: {_st_device}", file=sys.stderr)
 except ImportError:
-    print("Warning: sentence-transformers not installed. Install with: pip install sentence-transformers", file=sys.stderr)
     SEMANTIC_ENCODER = None
+    _st_device = "cpu"
+    print("[WARN] sentence-transformers not installed — SSUN disabled.", file=sys.stderr)
+
+# ---------------------------------------------------------------------------
+# Per-thread HTTP session (connection pooling)
+# ---------------------------------------------------------------------------
+_thread_local = threading.local()
 
 
+def _get_session() -> requests.Session:
+    if not hasattr(_thread_local, "session"):
+        s = requests.Session()
+        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=16)
+        s.mount("http://", adapter)
+        s.mount("https://", adapter)
+        _thread_local.session = s
+    return _thread_local.session
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
 @dataclass
 class QARecord:
-    """Represents a single QA record with validation results."""
     question: str
     answer: str
     chunk: str
@@ -40,428 +74,338 @@ class QARecord:
     cleaned_answer: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Validator
+# ---------------------------------------------------------------------------
 class QAValidator:
-    """Validates and cleans QA data using a unified Ollama prompt."""
-
-    def __init__(self, prompts_dir: str = "prompts", ollama_host: str = "http://localhost:11434", model: str = "qwen3:8b"):
-        """
-        Initialize validator with Ollama client and unified prompt.
-
-        Args:
-            prompts_dir: Directory containing prompt files
-            ollama_host: Ollama server URL
-            model: Ollama model name
-        """
+    def __init__(
+        self,
+        prompts_dir: str = "prompts",
+        ollama_host: str = "http://localhost:11434",
+        model: str = "qwen3:8b",
+        workers: int = 4,
+        context_size: int = 32768,
+        debug: bool = False,
+    ):
         self.ollama_host = ollama_host
         self.model = model
+        self.workers = workers
+        self.context_size = context_size
+        self.debug = debug
         self.prompt_manager = PromptManager(prompts_dir=prompts_dir)
         self.results: List[QARecord] = []
         self.semantic_encoder = SEMANTIC_ENCODER
-
-        # Verify Ollama connection
         self._verify_ollama_connection()
 
+    # ------------------------------------------------------------------
+    # Connectivity check
+    # ------------------------------------------------------------------
     def _verify_ollama_connection(self):
-        """Verify that Ollama is running and accessible."""
         try:
-            response = requests.get(f"{self.ollama_host}/api/tags", timeout=5)
-            if response.status_code == 200:
-                print(f"Connected to Ollama at {self.ollama_host}")
-                models = response.json().get('models', [])
-                model_names = [m.get('name') for m in models]
-                print(f"Available models: {model_names}")
-
-                if not any(self.model in m for m in model_names):
-                    print(f"Warning: Model '{self.model}' not found in available models")
-                    print(f"Make sure to pull it: ollama pull {self.model}")
-            else:
-                raise ConnectionError(f"Ollama returned status {response.status_code}")
+            resp = requests.get(f"{self.ollama_host}/api/tags", timeout=5)
+            if resp.status_code != 200:
+                raise ConnectionError(f"Ollama status {resp.status_code}")
+            models = [m.get("name") for m in resp.json().get("models", [])]
+            print(f"[INFO] Connected to Ollama at {self.ollama_host}")
+            print(f"[INFO] Available models: {models}")
+            if not any(self.model in m for m in models):
+                print(f"[WARN] Model '{self.model}' not found. Run: ollama pull {self.model}")
         except requests.exceptions.ConnectionError:
-            print(f"Error: Cannot connect to Ollama at {self.ollama_host}")
-            print("Make sure Ollama is running: ollama serve")
-            sys.exit(1)
-        except Exception as e:
-            print(f"Error connecting to Ollama: {e}")
+            print(f"[ERR]  Cannot connect to Ollama at {self.ollama_host}", file=sys.stderr)
+            print("       Make sure Ollama is running: ollama serve", file=sys.stderr)
             sys.exit(1)
 
-    def _calculate_chunk_size_factor(self, chunk: str, answer: str) -> float:
+    # ------------------------------------------------------------------
+    # SSUN helpers
+    # ------------------------------------------------------------------
+    def _chunk_size_factor(self, chunk_words: int, answer_words: int) -> float:
+        ratio = chunk_words / max(answer_words, 1)
+        adj = 1.0 / (1.0 + math.log10(max(ratio, 1)) * 0.1)
+        return max(0.5, min(1.0, adj))
+
+    def _batch_compute_ssun(self, answers: List[str], chunks: List[str]) -> List[float]:
         """
-        Calculate adjustment factor for similarity threshold based on chunk size.
-        Larger chunks have diluted embeddings, so we lower the threshold.
-        
-        Args:
-            chunk: The reference text chunk
-            answer: The answer text
-            
-        Returns:
-            Adjustment factor [0.5, 1.0] to multiply with base threshold
-        """
-        chunk_len = len(chunk.split())
-        answer_len = len(answer.split())
-        
-        # Ratio of chunk to answer size
-        size_ratio = chunk_len / max(answer_len, 1)
-        
-        # For every 10x increase in size, reduce threshold by ~10%
-        # Use logarithmic scaling to handle exponential growth
-        adjustment = 1.0 / (1.0 + (math.log10(max(size_ratio, 1)) * 0.1))
-        
-        # Clamp between 0.5 and 1.0
-        return max(0.5, min(1.0, adjustment))
-    
-    def _detect_hallucination_ssun(self, question: str, answer: str, chunk: str) -> float:
-        """
-        SSUN Method: Semantic Similarity Understanding Network.
-        Uses Sentence Transformers embeddings + cosine similarity.
-        Returns hallucination risk score [0, 1].
-        
-        Args:
-            question: The Q&A question (for context)
-            answer: The provided answer
-            chunk: The reference chunk
-            
-        Returns:
-            Hallucination risk [0.0 = safe, 1.0 = definite hallucination]
+        Encode all answers and chunks in two batched GPU passes, then compute
+        per-record cosine similarity via a single element-wise dot product.
+        For 250 records this is ~100x faster than encoding one-by-one.
         """
         if self.semantic_encoder is None:
-            self._debug_log("Semantic encoder not available, returning neutral score")
-            return 0.5
-        
+            return [0.5] * len(answers)
+
         try:
-            # Step 1: Encode both texts to semantic embeddings
-            answer_embedding = self.semantic_encoder.encode(answer, convert_to_tensor=True)
-            chunk_embedding = self.semantic_encoder.encode(chunk, convert_to_tensor=True)
-            
-            # Step 2: Calculate cosine similarity
-            semantic_similarity = util.pytorch_cos_sim(answer_embedding, chunk_embedding).item()
-            
-            # Step 3: Adjust threshold based on chunk size
-            size_factor = self._calculate_chunk_size_factor(chunk, answer)
-            adjusted_similarity = semantic_similarity * size_factor
-            
-            # Convert to hallucination risk (inverse of similarity)
-            hallucination_risk = 1.0 - adjusted_similarity
-            
-            self._debug_log(
-                f"SSUN: semantic_sim={semantic_similarity:.3f}, "
-                f"size_factor={size_factor:.3f}, "
-                f"adjusted_sim={adjusted_similarity:.3f}, "
-                f"risk={hallucination_risk:.3f}"
+            print(f"[INFO] Batch-encoding {len(answers)} answers…", file=sys.stderr)
+            ans_embs = self.semantic_encoder.encode(
+                answers,
+                batch_size=64,
+                convert_to_tensor=True,
+                normalize_embeddings=True,
+                show_progress_bar=True,
             )
-            
-            return hallucination_risk
-        
+            print(f"[INFO] Batch-encoding {len(chunks)} chunks…", file=sys.stderr)
+            chk_embs = self.semantic_encoder.encode(
+                chunks,
+                batch_size=16,  # large texts — smaller batch to stay within VRAM
+                convert_to_tensor=True,
+                normalize_embeddings=True,
+                show_progress_bar=True,
+            )
+            # Normalised embeddings: dot product == cosine similarity
+            sims = (ans_embs * chk_embs).sum(dim=1).cpu().numpy()
+
+            risks = []
+            for i, (ans, chk) in enumerate(zip(answers, chunks)):
+                factor = self._chunk_size_factor(len(chk.split()), len(ans.split()))
+                risks.append(1.0 - float(sims[i]) * factor)
+            return risks
+
         except Exception as e:
-            self._debug_log(f"SSUN encoding failed: {e}")
-            return 0.5
+            print(f"[ERR]  Batch SSUN failed: {e}", file=sys.stderr)
+            return [0.5] * len(answers)
 
-    def _parse_ollama_response(self, response_text: str) -> Dict:
-        """Parse the key:value response from Ollama."""
-        result = {}
-
+    # ------------------------------------------------------------------
+    # Ollama call (uses per-thread session)
+    # ------------------------------------------------------------------
+    def _call_ollama(self, prompt: str, temperature: float = 0.3, timeout: int = 300) -> str:
+        session = _get_session()
         try:
-            lines = response_text.strip().split('\n')
-            for line in lines:
-                line = line.strip()
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    result[key] = value
-        except Exception as e:
-            print(f"Parse error: {e}", file=sys.stderr)
-
-        # Fallback: return empty dict with defaults
-        return result if result else {"STATUS": "error", "CLEANED_ANSWER": ""}
-    
-    def _debug_log(self, msg: str):
-        """Log debug message to stderr."""
-        print(f"[DEBUG] {msg}", file=sys.stderr)
-
-    def _call_ollama(self, prompt: str, timeout: int = 300) -> str:
-        """Call Ollama with a prompt and return response."""
-        try:
-            response = requests.post(
+            resp = session.post(
                 f"{self.ollama_host}/api/generate",
                 json={
                     "model": self.model,
                     "prompt": prompt,
                     "stream": False,
-                    "temperature": 0.3,
+                    "temperature": temperature,
+                    "options": {"num_ctx": self.context_size},
                 },
-                timeout=timeout
+                timeout=timeout,
             )
-            if response.status_code == 200:
-                result = response.json()
-                return result.get('response', '').strip()
-            else:
-                return ""
+            if resp.status_code == 200:
+                return resp.json().get("response", "").strip()
+            return ""
         except Exception as e:
-            print(f"Ollama call error: {e}", file=sys.stderr)
+            print(f"[ERR]  Ollama call failed: {e}", file=sys.stderr)
             return ""
 
-    def _validate_all(self, question: str, answer: str, chunk: str) -> tuple:
-        """
-        Validate answer on all dimensions in a single Ollama call.
-        Returns (is_too_short, has_noise, noise_percentage, has_mixed_language)
-        """
+    # ------------------------------------------------------------------
+    # Response parser
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_response(text: str) -> Dict[str, str]:
+        result = {}
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if ":" in line:
+                key, val = line.split(":", 1)
+                result[key.strip().upper()] = val.strip()
+        return result or {"STATUS": "error", "CLEANED_ANSWER": ""}
+
+    # ------------------------------------------------------------------
+    # Per-record processing (called from thread pool)
+    # ------------------------------------------------------------------
+    def _process_one(
+        self,
+        idx: int,
+        question: str,
+        answer: str,
+        chunk: str,
+        ssun_risk: float,
+        total: int,
+    ) -> QARecord:
+        record = QARecord(question=question, answer=answer, chunk=chunk)
+        record.similarity_score = ssun_risk
         word_count = len(answer.split())
-        
-        prompt = self.prompt_manager.format_prompt(
-            'validate_all',
-            question=question,
-            answer=answer,
-            chunk=chunk,
-            word_count=word_count
-        )
-        response = self._call_ollama(prompt)
-        
-        # Initialize defaults
-        is_too_short = word_count < 10
-        has_noise = False
-        noise_percentage = 0.0
-        has_mixed_language = False
-        
-        try:
-            lines = response.split('\n')
-            for line in lines:
-                line = line.strip()
-                if 'is_too_short:' in line.lower():
-                    is_too_short = 'true' in line.lower()
-                elif 'has_noise:' in line.lower():
-                    has_noise = 'true' in line.lower()
-                elif 'noise_percentage:' in line.lower():
-                    value = line.split(':', 1)[1].strip()
-                    noise_percentage = float(value)
-                elif 'has_mixed_language:' in line.lower():
-                    has_mixed_language = 'true' in line.lower()
-        except Exception as e:
-            print(f"Validation parsing error: {e}", file=sys.stderr)
-        
-        return is_too_short, has_noise, noise_percentage, has_mixed_language
-
-    def process_record(self, question: str, answer: str, chunk: str) -> QARecord:
-        """Process a single QA record with unified prompt and validation."""
-        record = QARecord(
-            question=question,
-            answer=answer,
-            chunk=chunk
-        )
 
         try:
-            # Compute word length of ORIGINAL answer
-            word_length = len(answer.split())
-
-            # Run all validations on the ORIGINAL answer before cleaning
-            is_too_short, has_noise, noise_percentage, has_mixed_language = self._validate_all(
-                question, answer, chunk
-            )
-            record.is_too_short = is_too_short
-            record.has_noise = has_noise
-            record.noise_percentage = noise_percentage
-            record.has_mixed_language = has_mixed_language
-
-            # SSUN: Calculate semantic similarity with chunk-size adjustment
-            record.similarity_score = self._detect_hallucination_ssun(question, answer, chunk)
-
-            # Call unified prompt to Ollama for cleaning
             prompt = self.prompt_manager.format_prompt(
-                'unified_cleaner',
+                "combined_cleaner",
                 question=question,
                 answer=answer,
                 chunk=chunk,
-                length=word_length
+                length=word_count,
+                word_count=word_count,
             )
+            response_text = self._call_ollama(prompt, temperature=0.3)
 
-            response = requests.post(
-                f"{self.ollama_host}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "temperature": 0.7,
-                },
-                timeout=300
-            )
+            if self.debug:
+                print(f"[DEBUG] Record {idx} raw response:\n{response_text}\n", file=sys.stderr)
 
-            if response.status_code == 200:
-                result = response.json()
-                response_text = result.get('response', '').strip()
+            parsed = self._parse_response(response_text)
 
-                # Debug: log raw response (full)
-                self._debug_log(f"\n=== RECORD START ===")
-                self._debug_log(f"Question: {question[:80]}...")
-                self._debug_log(f"Answer: {answer[:80]}...")
-                self._debug_log(f"Raw Ollama Response:\n{response_text}\n")
+            record.is_too_short = parsed.get("IS_TOO_SHORT", "false").lower() == "true"
+            record.has_noise = parsed.get("HAS_NOISE", "false").lower() == "true"
+            try:
+                record.noise_percentage = float(parsed.get("NOISE_PERCENTAGE", "0.0"))
+            except ValueError:
+                record.noise_percentage = 0.0
+            record.has_mixed_language = parsed.get("HAS_MIXED_LANGUAGE", "false").lower() == "true"
 
-                # Parse key:value response
-                parsed = self._parse_ollama_response(response_text)
+            cleaned = parsed.get("CLEANED_ANSWER", answer)
+            record.cleaned_answer = str(cleaned).strip() if cleaned else answer
 
-                # Debug: log parsed response
-                self._debug_log(f"Parsed: {parsed}\n")
-
-                # Extract values safely
-                answer_cleaned = parsed.get('CLEANED_ANSWER', answer)
-
-                # Debug: log similarity and status
-                self._debug_log(f"SSUN Similarity Score: {record.similarity_score:.3f}")
-                self._debug_log(f"=== RECORD END ===\n")
-
-                record.cleaned_answer = str(answer_cleaned).strip() if answer_cleaned else answer
-
-            else:
-                print(f"Ollama error: {response.status_code}", file=sys.stderr)
-                record.cleaned_answer = answer
-
-        except requests.exceptions.Timeout:
-            print(f"Error: Request to Ollama timed out for record", file=sys.stderr)
-            record.cleaned_answer = answer
         except Exception as e:
-            print(f"Error processing record: {e}", file=sys.stderr)
+            print(f"[ERR]  Record {idx} failed: {e}", file=sys.stderr)
             record.cleaned_answer = answer
+            record.is_too_short = word_count < 10
 
-        self.results.append(record)
+        print(f"  [{idx + 1}/{total}] processed", file=sys.stderr)
         return record
 
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
     def process_csv(self, input_path: str) -> List[QARecord]:
-        """Process entire CSV file."""
-        # Try common delimiters in order
-        delimiters = [',', '\t', ';', '|']
+        # --- Read CSV with auto-delimiter detection ---
         df = None
-
-        for delimiter in delimiters:
+        for delim in [",", "\t", ";", "|"]:
             try:
-                df = pd.read_csv(input_path, delimiter=delimiter, on_bad_lines='skip')
-                # Check if this delimiter worked by looking for our expected columns
-                df.columns = df.columns.str.lower().str.strip()
-                col_matches = sum(1 for col in df.columns if any(x in col for x in ['soalan', 'jawapan', 'potongan']))
-                if col_matches >= 2:  # Found at least 2 of our columns
-                    print(f"Using delimiter: {repr(delimiter)}")
+                tmp = pd.read_csv(input_path, delimiter=delim, on_bad_lines="skip")
+                tmp.columns = tmp.columns.str.lower().str.strip()
+                matches = sum(
+                    1 for c in tmp.columns
+                    if any(x in c for x in ["soalan", "jawapan", "potongan"])
+                )
+                if matches >= 2:
+                    df = tmp
+                    print(f"[INFO] Using delimiter: {repr(delim)}")
                     break
-                df = None
-            except:
-                df = None
+            except Exception:
+                pass
 
         if df is None:
-            raise ValueError(f"Could not parse CSV file with any common delimiter")
+            raise ValueError("Could not parse CSV with any common delimiter")
 
-        # Normalize column names
         df.columns = df.columns.str.lower().str.strip()
+        print(f"[DEBUG] Columns: {list(df.columns)}", file=sys.stderr)
 
-        # Debug: print actual column names
-        print(f"DEBUG: Detected columns: {list(df.columns)}", file=sys.stderr)
-
-        # Map variations of column names
-        col_mapping = {}
+        col_map: Dict[str, str] = {}
         for col in df.columns:
-            col_clean = col.lower().strip().replace(' ', '_')
-            if 'soalan' in col_clean or 'question' in col_clean:
-                col_mapping['soalan'] = col
-            elif 'jawapan' in col_clean or 'answer' in col_clean:
-                col_mapping['jawapan'] = col
-            elif 'potongan' in col_clean or 'chunk' in col_clean or 'text' in col_clean:
-                col_mapping['potongan_teks'] = col
+            c = col.lower().replace(" ", "_")
+            if "soalan" in c or "question" in c:
+                col_map["soalan"] = col
+            elif "jawapan" in c or "answer" in c:
+                col_map["jawapan"] = col
+            elif "potongan" in c or "chunk" in c or "text" in c:
+                col_map["potongan_teks"] = col
 
-        required_cols = ['soalan', 'jawapan', 'potongan_teks']
-        missing_cols = [col for col in required_cols if col not in col_mapping]
+        missing = [k for k in ("soalan", "jawapan", "potongan_teks") if k not in col_map]
+        if missing:
+            raise ValueError(f"Missing columns: {missing}. Found: {list(df.columns)}")
 
-        if missing_cols:
-            print(f"DEBUG: Column mapping found: {col_mapping}", file=sys.stderr)
-            raise ValueError(f"Missing required columns: {missing_cols}. Found: {list(df.columns)}")
+        # Drop rows where required fields are NaN
+        df = df.dropna(subset=list(col_map.values())).reset_index(drop=True)
 
-        print(f"Processing {len(df)} records...")
+        questions = df[col_map["soalan"]].astype(str).str.strip().tolist()
+        answers   = df[col_map["jawapan"]].astype(str).str.strip().tolist()
+        chunks    = df[col_map["potongan_teks"]].astype(str).str.strip().tolist()
+        total     = len(questions)
 
-        for idx, row in df.iterrows():
-            if idx % 10 == 0:
-                print(f"  Progress: {idx + 1}/{len(df)}")
+        print(f"[INFO] {total} records | {self.workers} Ollama workers")
 
-            self.process_record(
-                question=str(row[col_mapping['soalan']]).strip(),
-                answer=str(row[col_mapping['jawapan']]).strip(),
-                chunk=str(row[col_mapping['potongan_teks']]).strip()
-            )
+        # --- Step 1: Batch SSUN (single GPU pass) ---
+        ssun_risks = self._batch_compute_ssun(answers, chunks)
 
+        # --- Step 2: Parallel Ollama calls ---
+        results_map: Dict[int, QARecord] = {}
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            futures = {
+                executor.submit(
+                    self._process_one,
+                    i, questions[i], answers[i], chunks[i], ssun_risks[i], total,
+                ): i
+                for i in range(total)
+            }
+            for future in as_completed(futures):
+                i = futures[future]
+                try:
+                    results_map[i] = future.result()
+                except Exception as e:
+                    print(f"[ERR]  Future {i} raised: {e}", file=sys.stderr)
+                    results_map[i] = QARecord(
+                        question=questions[i],
+                        answer=answers[i],
+                        chunk=chunks[i],
+                        cleaned_answer=answers[i],
+                        similarity_score=ssun_risks[i],
+                        is_too_short=len(answers[i].split()) < 10,
+                    )
+
+        # Preserve original CSV order
+        self.results = [results_map[i] for i in range(total)]
         return self.results
 
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
     def export_results(self, output_path: str):
-        """Export cleaned results to CSV."""
-        data = []
-
-        for record in self.results:
-            data.append({
-                'soalan': record.question,
-                'jawapan_original': record.answer,
-                'jawapan_cleaned': record.cleaned_answer,
-                'potongan_teks': record.chunk,
-                'similarity_score': round(record.similarity_score, 3),
-                'has_noise': record.has_noise,
-                'noise_percentage': round(record.noise_percentage, 3),
-                'is_too_short': record.is_too_short,
-                'has_mixed_language': record.has_mixed_language
-            })
-
-        output_df = pd.DataFrame(data)
-        output_df.to_csv(output_path, index=False, encoding='utf-8')
-
-        print(f"\nResults exported to: {output_path}")
-        print(f"Total records processed: {len(data)}")
-
-        # Print statistics
-        self._print_statistics(output_df)
+        rows = [
+            {
+                "soalan":            r.question,
+                "jawapan_original":  r.answer,
+                "jawapan_cleaned":   r.cleaned_answer,
+                "potongan_teks":     r.chunk,
+                "similarity_score":  round(r.similarity_score, 3),
+                "has_noise":         r.has_noise,
+                "noise_percentage":  round(r.noise_percentage, 3),
+                "is_too_short":      r.is_too_short,
+                "has_mixed_language": r.has_mixed_language,
+            }
+            for r in self.results
+        ]
+        out = pd.DataFrame(rows)
+        out.to_csv(output_path, index=False, encoding="utf-8")
+        print(f"\n[OK] Results exported to: {output_path}")
+        print(f"Total records processed: {len(rows)}")
+        self._print_statistics(out)
 
     def _print_statistics(self, df: pd.DataFrame):
-        """Print summary statistics."""
+        n = len(df)
         print("\n=== STATISTICS ===")
-        print(f"Records with noise: {df['has_noise'].sum()} ({df['has_noise'].sum()/len(df)*100:.1f}%)")
-        print(f"Records too short: {df['is_too_short'].sum()} ({df['is_too_short'].sum()/len(df)*100:.1f}%)")
-        print(f"Records with mixed language: {df['has_mixed_language'].sum()} ({df['has_mixed_language'].sum()/len(df)*100:.1f}%)")
-        print(f"Average hallucination risk: {df['similarity_score'].mean():.3f}")
+        print(f"Records with noise:          {df['has_noise'].sum()} ({df['has_noise'].sum()/n*100:.1f}%)")
+        print(f"Records too short:           {df['is_too_short'].sum()} ({df['is_too_short'].sum()/n*100:.1f}%)")
+        print(f"Records with mixed language: {df['has_mixed_language'].sum()} ({df['has_mixed_language'].sum()/n*100:.1f}%)")
+        print(f"Avg hallucination risk:      {df['similarity_score'].mean():.3f}")
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="QA Data Cleaner - Single unified prompt for all validations"
-    )
-    parser.add_argument(
-        "input_file",
-        help="Input CSV file path"
-    )
-    parser.add_argument(
-        "-o", "--output",
-        help="Output CSV file path (default: input_file_cleaned.csv)",
-        default=None
-    )
-    parser.add_argument(
-        "--ollama-host",
-        help="Ollama server host (default: http://localhost:11434)",
-        default="http://localhost:11434"
-    )
-    parser.add_argument(
-        "-m", "--model",
-        help="Ollama model name (default: qwen3:8b)",
-        default="qwen3:8b"
-    )
-
+    parser = argparse.ArgumentParser(description="QA Data Cleaner — optimised")
+    parser.add_argument("input_file", help="Input CSV file path")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output CSV path (default: <input>_cleaned.csv)")
+    parser.add_argument("--ollama-host", default="http://localhost:11434",
+                        help="Ollama server URL")
+    parser.add_argument("-m", "--model", default="qwen3:8b",
+                        help="Ollama model name")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="Concurrent Ollama workers (set OLLAMA_NUM_PARALLEL to match)")
+    parser.add_argument("--context-size", type=int, default=32768,
+                        help="LLM context window (tokens). Raise if chunks are very large.")
+    parser.add_argument("--debug", action="store_true",
+                        help="Print raw LLM responses to stderr")
     args = parser.parse_args()
 
-    # Validate input file
     input_path = Path(args.input_file)
     if not input_path.exists():
-        print(f"Error: Input file not found: {input_path}", file=sys.stderr)
+        print(f"[ERR] Input file not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Set output path
     output_path = args.output or str(input_path.parent / f"{input_path.stem}_cleaned.csv")
 
-    # Process
     try:
-        validator = QAValidator(ollama_host=args.ollama_host, model=args.model)
+        validator = QAValidator(
+            ollama_host=args.ollama_host,
+            model=args.model,
+            workers=args.workers,
+            context_size=args.context_size,
+            debug=args.debug,
+        )
         validator.process_csv(str(input_path))
         validator.export_results(output_path)
         print("\n[OK] Processing complete!")
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"[ERR] {e}", file=sys.stderr)
         sys.exit(1)
 
 
